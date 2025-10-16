@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: polydrone-inspection-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -w 2 app:app --bind 0.0.0.0:$PORT
+    autoDeploy: true
+    envVars:
+      - key: POLYDRONE_ENV
+        value: dev
