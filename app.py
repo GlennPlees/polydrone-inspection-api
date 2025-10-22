@@ -1,24 +1,25 @@
 """
-Polydrone Inference API — FastAPI skeleton (v0)
+Polydrone Inference API — FastAPI (Vision-enabled)
 
 Run lokaal:
     uvicorn app:app --reload --port 8080
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import uuid
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from openai import OpenAI
 
 # -------------------------------
 # Settings & Paths
@@ -197,7 +198,7 @@ class WebhookNotifyOut(BaseModel):
 # -------------------------------
 # App
 # -------------------------------
-app = FastAPI(title="Polydrone Inference API", version="0.0.1")
+app = FastAPI(title="Polydrone Inference API", version="0.0.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allow_origins,
@@ -206,7 +207,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Forceer JSON bij fouten i.p.v. HTML ---
+# --- Forceer JSON bij fouten ---
 @app.exception_handler(HTTPException)
 async def json_http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
@@ -239,7 +240,6 @@ async def create_case_folder(payload: CreateCaseFolderIn):
 async def list_assets(payload: ListAssetsIn):
     if payload.caseId not in CASES:
         raise HTTPException(404, "case not found")
-
     assets_dir = case_root(payload.caseId) / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     assets_list: List[Asset] = []
@@ -260,7 +260,6 @@ async def normalize_filenames(payload: NormalizeFilenamesIn):
     pattern = payload.pattern
     if "{index}" not in pattern:
         raise HTTPException(400, "pattern must contain {index}")
-
     assets_dir = case_root(payload.caseId) / "assets"
     files = sorted([p for p in assets_dir.iterdir() if p.is_file()])
     renamed: List[RenameResult] = []
@@ -273,27 +272,116 @@ async def normalize_filenames(payload: NormalizeFilenamesIn):
         renamed.append(RenameResult(**{"from": str(src), "to": str(target)}))
     return NormalizeFilenamesOut(renamed=renamed)
 
+# --- Upload één asset (multipart) ---
+@app.post("/assets:upload")
+async def upload_asset(caseId: str = Form(...), file: UploadFile = File(...)):
+    if caseId not in CASES:
+        ensure_case(caseId)
+        CASES[caseId] = {"created": now_ts()}
+    assets_dir = case_root(caseId) / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename).suffix.lower() or ".jpg"
+    out = assets_dir / f"{datetime.utcnow().strftime('%Y%m%d')}_{caseId}_{uuid.uuid4().hex[:6]}{ext}"
+    with out.open("wb") as f:
+        f.write(await file.read())
+    return {"uploaded": str(out)}
+
 # -------------------------------
-# Jobs (segmentation) — simulated
+# Jobs (segmentation) — simple passthrough (Vision or later real model)
 # -------------------------------
 async def _run_segmentation_job(job_id: str, case_id: str, asset_paths: List[str]):
+    """
+    Voor nu: genereer Predictions uit Vision-assess per asset (synchroon in batch).
+    Later kun je dit vervangen door je eigen model/inference.
+    """
     JOBS[job_id]["status"] = "running"
-    steps = max(5, min(20, len(asset_paths)))
-    for i in range(steps):
-        await asyncio.sleep(0.3)
-        JOBS[job_id]["progress"] = (i + 1) / steps
     results_dir = case_root(case_id) / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / f"predictions_{job_id}.json"
-    fake_items = []
-    for ap in asset_paths:
-        fake_items.append({
-            "assetPath": ap,
-            "masks": [{"label": "roof", "polygon": [0.1,0.1, 0.9,0.1, 0.9,0.9, 0.1,0.9]}],
-            "damages": [{"type": "missing_tile", "bbox": [100,120,180,200], "confidence": 0.8, "severity": 3}],
-        })
-    data = {"items": fake_items}
-    results_path.write_text(json.dumps(data, indent=2))
+
+    # Vision client & schema
+    VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
+    client = OpenAI()
+
+    VISION_JSON_SCHEMA = {
+        "name": "VisionAssessment",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "predictions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["crack","missing_tile","lifted_edge","corrosion","tear","ponding"]},
+                            "bbox": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "minItems": 4,
+                                "maxItems": 4
+                            },
+                            "confidence": {"type": "number"},
+                            "severity": {"type": "integer", "minimum": 1, "maximum": 5}
+                        },
+                        "required": ["type","confidence","severity"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "required": ["predictions"],
+            "additionalProperties": False
+        },
+        "strict": True
+    }
+
+    def _img_to_data_url(path: str) -> str:
+        p = Path(path)
+        raw = p.read_bytes()
+        mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
+    items = []
+    n = len(asset_paths)
+    for i, ap in enumerate(asset_paths, start=1):
+        try:
+            data_url = _img_to_data_url(ap)
+            system_msg = (
+                "You are a roofing damage inspection assistant. "
+                "Look for: missing_tile, crack, lifted_edge, corrosion, tear, ponding. "
+                "Return only what you see; no guesses. "
+                "If unsure, omit. Set severity 1..5 based on visible impact. "
+                "If you cannot localize precisely, set bbox to null."
+            )
+            resp = client.responses.create(
+                model=VISION_MODEL,
+                input=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": system_msg},
+                        {"type": "input_image", "image_url": {"url": data_url}}
+                    ]
+                }],
+                response_format={"type": "json_schema", "json_schema": VISION_JSON_SCHEMA},
+            )
+            parsed = resp.output_parsed or {"predictions": []}
+            damages = []
+            for it in parsed.get("predictions", []):
+                damages.append({
+                    "type": it["type"],
+                    "bbox": it.get("bbox") or [0,0,0,0],
+                    "confidence": float(it["confidence"]),
+                    "severity": int(it["severity"]),
+                })
+            items.append({"assetPath": ap, "masks": [], "damages": damages})
+        except Exception as e:
+            items.append({"assetPath": ap, "masks": [], "damages": []})
+            JOBS[job_id]["error"] = f"vision error on {ap}: {e}"
+
+        JOBS[job_id]["progress"] = i / max(1, n)
+        await asyncio.sleep(0)  # yield loop
+
+    (results_dir / f"predictions_{job_id}.json").write_text(json.dumps({"items": items}, indent=2))
     JOBS[job_id]["status"] = "succeeded"
     JOBS[job_id]["resultsPath"] = str(results_path)
 
@@ -332,9 +420,109 @@ async def get_predictions(resultsPath: str):
     if not p.exists():
         raise HTTPException(404, "resultsPath not found")
     data = json.loads(p.read_text())
-    out = PredictionsOut(**data)  # validatie
+    out = PredictionsOut(**data)
     PREDICTIONS[resultsPath] = out.model_dump()
     return out
+
+# -------------------------------
+# Vision: assess 1 foto (directe endpoint)
+# -------------------------------
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
+_openai_client = OpenAI()
+
+VISION_JSON_SCHEMA = {
+    "name": "VisionAssessment",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "predictions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["crack","missing_tile","lifted_edge","corrosion","tear","ponding"]},
+                        "bbox": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "minItems": 4,
+                            "maxItems": 4
+                        },
+                        "confidence": {"type": "number"},
+                        "severity": {"type": "integer", "minimum": 1, "maximum": 5}
+                    },
+                    "required": ["type","confidence","severity"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        "required": ["predictions"],
+        "additionalProperties": False
+    },
+    "strict": True
+}
+
+def _img_to_data_url_any(path_or_bytes: bytes | str) -> str:
+    if isinstance(path_or_bytes, (bytes, bytearray)):
+        raw = bytes(path_or_bytes)
+        mime = "image/jpeg"
+    else:
+        p = Path(path_or_bytes)
+        raw = p.read_bytes()
+        mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+@app.post("/vision:assess")
+async def vision_assess(caseId: str = Form(...),
+                        file: UploadFile = File(None),
+                        assetPath: str = Form(None)):
+    if file is None and assetPath is None:
+        raise HTTPException(400, "Provide either 'file' (multipart) or 'assetPath'.")
+    if file is not None:
+        img_bytes = await file.read()
+        data_url = _img_to_data_url_any(img_bytes)
+    else:
+        if not Path(assetPath).exists():
+            raise HTTPException(404, f"assetPath not found: {assetPath}")
+        data_url = _img_to_data_url_any(assetPath)
+
+    system_msg = (
+        "You are a roofing damage inspection assistant. "
+        "Look for: missing_tile, crack, lifted_edge, corrosion, tear, ponding. "
+        "Return only what you see; no guesses. "
+        "If unsure, omit. Set severity 1..5 based on visible impact. "
+        "If you cannot localize precisely, set bbox to null."
+    )
+
+    try:
+        resp = _openai_client.responses.create(
+            model=VISION_MODEL,
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": system_msg},
+                    {"type": "input_image", "image_url": {"url": data_url}}
+                ]
+            }],
+            response_format={"type": "json_schema", "json_schema": VISION_JSON_SCHEMA},
+        )
+        obj = resp.output_parsed or {"predictions": []}
+    except Exception as e:
+        raise HTTPException(500, f"vision error: {e}")
+
+    items = [{
+        "assetPath": assetPath or f"uploaded://{caseId}/{uuid.uuid4().hex[:8]}",
+        "masks": [],
+        "damages": [
+            {
+                "type": it["type"],
+                "bbox": it.get("bbox") or [0,0,0,0],
+                "confidence": float(it["confidence"]),
+                "severity": int(it["severity"]),
+            } for it in obj.get("predictions", [])
+        ]
+    }]
+    return {"items": items}
 
 # -------------------------------
 # Overlays (placeholder)
@@ -387,7 +575,7 @@ async def webhook_notify(payload: WebhookNotifyIn):
     return WebhookNotifyOut(status=202)
 
 # -------------------------------
-# Health (JSON enforced)
+# Health
 # -------------------------------
 @app.get("/healthz")
 async def healthz():
@@ -397,7 +585,7 @@ async def healthz():
     )
 
 # -------------------------------
-# Dev convenience: seed assets
+# Dev: seed assets (demo)
 # -------------------------------
 @app.post("/dev:seed-assets")
 async def dev_seed_assets(caseId: str, count: int = 5):
