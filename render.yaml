@@ -9,3 +9,7 @@ services:
     envVars:
       - key: POLYDRONE_ENV
         value: dev
+      - key: OPENAI_API_KEY    # voeg de waarde toe via Render UI (Settings → Environment)
+        sync: false
+      - key: VISION_MODEL
+        value: gpt-4o-mini
