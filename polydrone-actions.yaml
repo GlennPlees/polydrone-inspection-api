@@ -1,0 +1,253 @@
+openapi: 3.1.0
+info:
+  title: Polydrone Inference API
+  version: "0.0.2"
+servers:
+  - url: https://polydrone-inspection-api.onrender.com
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Health check
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /cases:
+    post:
+      operationId: create_case_folder
+      summary: Maak mappen voor een nieuw dossier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caseId, root]
+              properties:
+                caseId: { type: string }
+                root: { type: string }
+                subfolders: { type: array, items: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /assets:list:
+    post:
+      operationId: list_assets
+      summary: Lijst assets voor een case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caseId]
+              properties:
+                caseId: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /assets:normalize:
+    post:
+      operationId: normalize_filenames
+      summary: Hernoem assets volgens patroon
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caseId, pattern]
+              properties:
+                caseId: { type: string }
+                pattern: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /assets:upload:
+    post:
+      operationId: upload_asset
+      summary: Upload één asset (multipart)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [caseId, file]
+              properties:
+                caseId: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /jobs/roof-segmentation:start:
+    post:
+      operationId: start_roof_segmentation_job
+      summary: Start analysejob (Vision)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caseId, assetPaths]
+              properties:
+                caseId: { type: string }
+                assetPaths: { type: array, items: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /jobs:status:
+    post:
+      operationId: get_job_status
+      summary: Poll jobstatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId]
+              properties:
+                jobId: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /predictions:
+    get:
+      operationId: get_predictions
+      summary: Haal predicties op uit resultsPath
+      parameters:
+        - in: query
+          name: resultsPath
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /vision:assess:
+    post:
+      operationId: vision_assess
+      summary: Analyseer 1 foto met GPT-4o Vision en geef gestructureerde schade-items
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                caseId: { type: string }
+                file: { type: string, format: binary }
+                assetPath: { type: string }
+              anyOf:
+                - required: [caseId, file]
+                - required: [caseId, assetPath]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /render/overlays:
+    post:
+      operationId: render_overlays
+      summary: Genereer overlay-afbeeldingen (placeholder)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [assetPath]
+                    properties:
+                      assetPath: { type: string }
+                      boxes: { type: array }
+                      masks: { type: array }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /reports:generate:
+    post:
+      operationId: generate_report
+      summary: Genereer PDF + findings.json voor case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [caseId, customer, findings]
+              properties:
+                caseId: { type: string }
+                customer:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string }
+                    policyId: { type: string }
+                    address: { type: string }
+                findings: { type: object }
+                locale:
+                  type: string
+                  enum: ["nl-BE","fr-BE"]
+                template:
+                  type: string
+                  enum: ["claim","maintenance"]
+                includeImages: { type: boolean, default: true }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /email:send:
+    post:
+      operationId: email_report
+      summary: Verstuur rapport per mail (placeholder)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, subject, bodyHtml]
+              properties:
+                to: { type: array, items: { type: string } }
+                subject: { type: string }
+                bodyHtml: { type: string }
+                attachments: { type: array, items: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /webhook:notify:
+    post:
+      operationId: webhook_notify
+      summary: Stuur webhook naar partner/verzekeraar (placeholder)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, payload]
+              properties:
+                url: { type: string }
+                payload: { type: object }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+
+  /dev:seed-assets:
+    post:
+      operationId: dev_seed_assets
+      summary: Maak demo-assets aan (placeholders .jpg)
+      parameters:
+        - in: query
+          name: caseId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: count
+          required: false
+          schema: { type: integer, default: 3 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
